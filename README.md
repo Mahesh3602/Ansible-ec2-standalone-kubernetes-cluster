@@ -16,7 +16,7 @@ ansible-playbook workers.yml
 - kubectl get nodes 
 - kubectl get pods --all-namespaces
 
-# configure cluster to access locally (need correct details)
+# configure cluster to access locally 
 - generate certificate with publicIP on control plane
 sudo rm /etc/kubernetes/pki/apiserver.{crt,key}
 sudo kubeadm init phase certs apiserver --apiserver-cert-extra-sans=<PUBLIC_IP>
