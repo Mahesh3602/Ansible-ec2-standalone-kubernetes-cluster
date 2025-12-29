@@ -1,0 +1,30 @@
+---
+- name: Configure Kubernetes workers
+  hosts: workers
+  become: yes
+  vars:
+    containerd_config_path: /etc/containerd/config.toml
+
+  roles:
+    - role: k8s_common
+
+  tasks:
+    - name: Fetch join command from control plane
+      ansible.builtin.fetch:
+        src: /tmp/kube_join_command.sh
+        dest: /tmp/kube_join_command.sh
+        flat: yes
+      delegate_to: cp
+      run_once: true
+
+    - name: Copy join command to worker node
+      ansible.builtin.copy:
+        src: /tmp/kube_join_command.sh
+        dest: /tmp/kube_join_command.sh
+        mode: '0700'
+
+    - name: Execute Kubernetes join command
+      ansible.builtin.shell: sh /tmp/kube_join_command.sh
+      become: yes
+      args:
+        executable: /bin/bash
