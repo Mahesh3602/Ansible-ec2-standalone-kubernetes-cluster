@@ -19,17 +19,20 @@ ansible-playbook workers.yml
 # configure cluster to access locally 
 - generate certificate with publicIP on control plane
 sudo rm /etc/kubernetes/pki/apiserver.{crt,key}
-sudo kubeadm init phase certs apiserver --apiserver-cert-extra-sans=<PUBLIC_IP>
+sudo kubeadm init phase certs apiserver --apiserver-cert-extra-sans=<CONTROLPLANE_PUBLIC_IP>
+sudo kubeadm init phase certs apiserver --apiserver-cert-extra-sans=18.234.195.183
 - For containerd (standard in newer versions)
 sudo crictl ps | grep kube-apiserver | awk '{print $1}' | xargs sudo crictl stop
 
 
 - On your local machine
-  scp -i path/to/my-terraform-key ubuntu@<control-plane-ip>:/etc/kubernetes/admin.conf ./kubeconfig
-ssh -i my-terraform-key ubuntu@54.166.5.198 'sudo cat /etc/kubernetes/admin.conf' > ./kubeconfig
+ssh -i my-terraform-key ubuntu@<CONTROLPLANE_PUBLIC_IP> 'sudo cat /etc/kubernetes/admin.conf' > ./kubeconfig
+ssh -i my-terraform-key ubuntu@18.234.195.183 'sudo cat /etc/kubernetes/admin.conf' > ./kubeconfig
 
 - change public IP in ./kubeconfig
 export KUBECONFIG=$PWD/kubeconfig
+
+- Allow inbound traffic on security group port 6443 of ControlPlane
 
 # test cluster
 kubectl get nodes
