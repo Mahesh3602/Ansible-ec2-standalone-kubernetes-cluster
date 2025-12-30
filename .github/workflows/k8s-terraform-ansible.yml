@@ -8,27 +8,17 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # This links the job to the environment where your secrets are stored
+    environment: Actions 
 
     defaults:
       run:
         shell: bash
 
     steps:
-    # -------------------------
-    # Checkout code
-    # -------------------------
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Debug Secret Check
-      run: |
-        if [ -z "${{ secrets.AWS_REGION }}" ]; then
-          echo "ERROR: AWS_REGION secret is EMPTY"
-          exit 1
-        else
-          echo "AWS_REGION is set."
-        fi
-      
     # -------------------------
     # AWS Credentials
     # -------------------------
@@ -48,17 +38,21 @@ jobs:
     - name: Terraform Init
       run: terraform init
 
-    - name: Terraform Apply (auto-approve)
+    - name: Terraform Apply
       run: terraform apply -auto-approve
 
     # -------------------------
-    # Capture Terraform outputs
+    # Capture Terraform outputs (Fixed IP handling)
     # -------------------------
     - name: Read Terraform outputs
       id: tf
       run: |
-        echo "CONTROL_PLANE_IP=$(terraform output -raw control_plane_ip)" >> $GITHUB_ENV
-        echo "WORKER_IPS=$(terraform output -json worker_ips | jq -r '.[]')" >> $GITHUB_ENV
+        CP_IP=$(terraform output -raw control_plane_ip)
+        # Converts JSON array [ "ip1", "ip2" ] into a space-separated string "ip1 ip2"
+        W_IPS=$(terraform output -json worker_ips | jq -r '. | join(" ")')
+        
+        echo "CONTROL_PLANE_IP=$CP_IP" >> $GITHUB_ENV
+        echo "WORKER_IPS=$W_IPS" >> $GITHUB_ENV
 
     # -------------------------
     # SSH Setup
@@ -68,8 +62,12 @@ jobs:
         mkdir -p ~/.ssh
         echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -H $CONTROL_PLANE_IP >> ~/.ssh/known_hosts
-        for ip in $WORKER_IPS; do
+        
+        # Scan Control Plane
+        ssh-keyscan -H ${{ env.CONTROL_PLANE_IP }} >> ~/.ssh/known_hosts
+        
+        # Scan Workers
+        for ip in ${{ env.WORKER_IPS }}; do
           ssh-keyscan -H $ip >> ~/.ssh/known_hosts
         done
 
@@ -79,7 +77,7 @@ jobs:
     - name: Install Ansible
       run: |
         sudo apt update
-        sudo apt install -y ansible jq
+        sudo apt install -y ansible
 
     # -------------------------
     # Generate Ansible inventory
@@ -87,37 +85,24 @@ jobs:
     - name: Generate Ansible inventory
       run: |
         mkdir -p k8s-ansible/inventory
-
+        
         echo "[controlplane]" > k8s-ansible/inventory/hosts.ini
-        echo "cp ansible_host=$CONTROL_PLANE_IP ansible_user=ubuntu" >> k8s-ansible/inventory/hosts.ini
+        echo "cp ansible_host=${{ env.CONTROL_PLANE_IP }} ansible_user=ubuntu" >> k8s-ansible/inventory/hosts.ini
 
         echo "" >> k8s-ansible/inventory/hosts.ini
         echo "[workers]" >> k8s-ansible/inventory/hosts.ini
 
         i=1
-        for ip in $WORKER_IPS; do
+        for ip in ${{ env.WORKER_IPS }}; do
           echo "worker$i ansible_host=$ip ansible_user=ubuntu" >> k8s-ansible/inventory/hosts.ini
           i=$((i+1))
         done
 
-        echo ""
-        echo "Generated inventory:"
-        cat k8s-ansible/inventory/hosts.ini
-
     # -------------------------
-    # Run Ansible – Control Plane
+    # Run Ansible
     # -------------------------
-    - name: Configure Control Plane
+    - name: Run Playbooks
       run: |
-        ansible-playbook \
-          -i k8s-ansible/inventory/hosts.ini \
-          k8s-ansible/controlplane.yml
-
-    # -------------------------
-    # Run Ansible – Workers
-    # -------------------------
-    - name: Configure Worker Nodes
-      run: |
-        ansible-playbook \
-          -i k8s-ansible/inventory/hosts.ini \
-          k8s-ansible/workers.yml
+        # Using -u ubuntu and the private key path explicitly
+        ansible-playbook -i k8s-ansible/inventory/hosts.ini k8s-ansible/controlplane.yml --private-key ~/.ssh/id_rsa
+        ansible-playbook -i k8s-ansible/inventory/hosts.ini k8s-ansible/workers.yml --private-key ~/.ssh/id_rsa
