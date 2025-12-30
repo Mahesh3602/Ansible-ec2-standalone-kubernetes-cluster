@@ -1,80 +1,114 @@
-name: Terraform + Ansible Kubernetes Cluster
+name: Provision EC2 + Deploy Kubernetes with Ansible
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    # -------------------------
+    # Checkout code
+    # -------------------------
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # -----------------------------
-      # Terraform
-      # -----------------------------
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+    # -------------------------
+    # AWS Credentials
+    # -------------------------
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Terraform Init
-        run: terraform init
+    # -------------------------
+    # Terraform
+    # -------------------------
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform Apply (auto-approve)
-        run: terraform apply -auto-approve
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+    - name: Terraform Init
+      run: terraform init
 
-      # -----------------------------
-      # SSH key
-      # -----------------------------
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+    - name: Terraform Apply (auto-approve)
+      run: terraform apply -auto-approve
 
-      # -----------------------------
-      # Install Ansible
-      # -----------------------------
-      - name: Install Ansible
-        run: |
-          sudo apt update
-          sudo apt install -y ansible
+    # -------------------------
+    # Capture Terraform outputs
+    # -------------------------
+    - name: Read Terraform outputs
+      id: tf
+      run: |
+        echo "CONTROL_PLANE_IP=$(terraform output -raw control_plane_ip)" >> $GITHUB_ENV
+        echo "WORKER_IPS=$(terraform output -json worker_ips | jq -r '.[]')" >> $GITHUB_ENV
 
-      # -----------------------------
-      # Generate inventory from Terraform outputs
-      # -----------------------------
-      - name: Generate Ansible inventory
-        run: |
-          CONTROL_PLANE_IP=$(terraform output -raw control_plane_ip)
+    # -------------------------
+    # SSH Setup
+    # -------------------------
+    - name: Setup SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H $CONTROL_PLANE_IP >> ~/.ssh/known_hosts
+        for ip in $WORKER_IPS; do
+          ssh-keyscan -H $ip >> ~/.ssh/known_hosts
+        done
 
-          echo "[controlplane]" > inventory.ini
-          echo "$CONTROL_PLANE_IP" >> inventory.ini
-          echo "" >> inventory.ini
+    # -------------------------
+    # Install Ansible
+    # -------------------------
+    - name: Install Ansible
+      run: |
+        sudo apt update
+        sudo apt install -y ansible jq
 
-          echo "[workers]" >> inventory.ini
-          terraform output -json worker_ips | jq -r '.[]' >> inventory.ini
-          echo "" >> inventory.ini
+    # -------------------------
+    # Generate Ansible inventory
+    # -------------------------
+    - name: Generate Ansible inventory
+      run: |
+        mkdir -p k8s-ansible/inventory
 
-          echo "[all:vars]" >> inventory.ini
-          echo "ansible_user=ubuntu" >> inventory.ini
-          echo "ansible_ssh_private_key_file=~/.ssh/id_rsa" >> inventory.ini
-          echo "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
+        echo "[controlplane]" > k8s-ansible/inventory/hosts.ini
+        echo "cp ansible_host=$CONTROL_PLANE_IP ansible_user=ubuntu" >> k8s-ansible/inventory/hosts.ini
 
-      - name: Show inventory
-        run: cat inventory.ini
+        echo "" >> k8s-ansible/inventory/hosts.ini
+        echo "[workers]" >> k8s-ansible/inventory/hosts.ini
 
-      # -----------------------------
-      # Ansible runs
-      # -----------------------------
-      - name: Configure Control Plane
-        run: ansible-playbook -i inventory.ini controlplane.yml
+        i=1
+        for ip in $WORKER_IPS; do
+          echo "worker$i ansible_host=$ip ansible_user=ubuntu" >> k8s-ansible/inventory/hosts.ini
+          i=$((i+1))
+        done
 
-      - name: Configure Workers
-        run: ansible-playbook -i inventory.ini workers.yml
+        echo ""
+        echo "Generated inventory:"
+        cat k8s-ansible/inventory/hosts.ini
+
+    # -------------------------
+    # Run Ansible – Control Plane
+    # -------------------------
+    - name: Configure Control Plane
+      run: |
+        ansible-playbook \
+          -i k8s-ansible/inventory/hosts.ini \
+          k8s-ansible/controlplane.yml
+
+    # -------------------------
+    # Run Ansible – Workers
+    # -------------------------
+    - name: Configure Worker Nodes
+      run: |
+        ansible-playbook \
+          -i k8s-ansible/inventory/hosts.ini \
+          k8s-ansible/workers.yml
