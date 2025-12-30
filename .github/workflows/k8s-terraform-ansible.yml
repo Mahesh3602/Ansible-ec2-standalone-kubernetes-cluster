@@ -20,6 +20,15 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Debug Secret Check
+      run: |
+        if [ -z "${{ secrets.AWS_REGION }}" ]; then
+          echo "ERROR: AWS_REGION secret is EMPTY"
+          exit 1
+        else
+          echo "AWS_REGION is set."
+        fi
+      
     # -------------------------
     # AWS Credentials
     # -------------------------
