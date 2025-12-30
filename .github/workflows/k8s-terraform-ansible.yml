@@ -5,11 +5,14 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  AWS_REGION: us-east-1
 jobs:
   deploy:
     runs-on: ubuntu-latest
     # This links the job to the environment where your secrets are stored
     environment: Actions 
+    
 
     defaults:
       run:
