@@ -9,22 +9,23 @@
     - role: k8s_common
 
   tasks:
-    - name: Fetch join command from control plane
-      ansible.builtin.fetch:
-        src: /tmp/kube_join_command.sh
-        dest: /tmp/kube_join_command.sh
-        flat: yes
-      delegate_to: cp
+    - name: Get join command from control plane
+      # We use the name defined in your Terraform-generated inventory.ini
+      delegate_to: control-plane-01
       run_once: true
+      ansible.builtin.shell: kubeadm token create --print-join-command
+      register: join_command_raw
 
-    - name: Copy join command to worker node
-      ansible.builtin.copy:
-        src: /tmp/kube_join_command.sh
-        dest: /tmp/kube_join_command.sh
-        mode: '0700'
+    - name: Set join command as a fact
+      ansible.builtin.set_fact:
+        kubernetes_join_command: "{{ join_command_raw.stdout }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      with_items: "{{ groups['workers'] }}"
 
     - name: Execute Kubernetes join command
-      ansible.builtin.shell: sh /tmp/kube_join_command.sh
+      ansible.builtin.shell: "{{ kubernetes_join_command }}"
       become: yes
       args:
-        executable: /bin/bash
+        # This 'creates' check prevents the worker from trying to join twice
+        creates: /etc/kubernetes/kubelet.conf

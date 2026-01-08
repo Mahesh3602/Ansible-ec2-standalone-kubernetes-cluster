@@ -15,15 +15,28 @@ variable "private_key_path" {
 }
 
 ################################
+# Data Sources
+################################
+# Dynamically find available AZs in us-east-1
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_ami" "ubuntu_24_04" {
+  most_recent = true
+  filter {
+    name   = "name"
+    values = ["*ubuntu-noble-24.04-amd64-server-*"]
+  }
+  owners = ["099720109477"]
+}
+
+################################
 # Key Pair
 ################################
 resource "aws_key_pair" "ec2_key" {
   key_name   = "my-terraform-key"
   public_key = file("${var.private_key_path}.pub")
-
-  tags = {
-    Project = "kubernetes-lab"
-  }
 }
 
 ################################
@@ -31,40 +44,28 @@ resource "aws_key_pair" "ec2_key" {
 ################################
 resource "aws_vpc" "k8s_vpc" {
   cidr_block = "10.0.0.0/16"
-
-  tags = {
-    Name = "k8s-vpc"
-  }
+  tags = { Name = "k8s-vpc" }
 }
 
 resource "aws_subnet" "public_subnet" {
   vpc_id                  = aws_vpc.k8s_vpc.id
   cidr_block              = "10.0.1.0/24"
   map_public_ip_on_launch = true
+  # FIX: Uses the first available AZ (usually us-east-1a) to avoid the t3.small error
+  availability_zone       = data.aws_availability_zones.available.names[0]
 
-  tags = {
-    Name = "k8s-public-subnet"
-  }
+  tags = { Name = "k8s-public-subnet" }
 }
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.k8s_vpc.id
-
-  tags = {
-    Name = "k8s-igw"
-  }
 }
 
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.k8s_vpc.id
-
   route {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.igw.id
-  }
-
-  tags = {
-    Name = "k8s-public-rt"
   }
 }
 
@@ -93,7 +94,7 @@ resource "aws_security_group" "k8s_sg" {
     from_port   = 6443
     to_port     = 6443
     protocol    = "tcp"
-    cidr_blocks = [aws_vpc.k8s_vpc.cidr_block]
+    cidr_blocks = ["0.0.0.0/0"] # Modified to allow remote access
   }
 
   ingress {
@@ -110,87 +111,70 @@ resource "aws_security_group" "k8s_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  tags = {
-    Name = "k8s-sg"
-  }
-}
-
-################################
-# AMI
-################################
-data "aws_ami" "ubuntu_24_04" {
-  most_recent = true
-
-  filter {
-    name   = "name"
-    values = ["*ubuntu-noble-24.04-amd64-server-*"]
-  }
-
-  owners = ["099720109477"]
 }
 
 ################################
 # EC2 Instances
 ################################
 
-# Control Plane
 resource "aws_instance" "control_plane" {
   ami           = data.aws_ami.ubuntu_24_04.id
   instance_type = "t3.small"
-
-  key_name               = aws_key_pair.ec2_key.key_name
-  subnet_id              = aws_subnet.public_subnet.id
+  key_name      = aws_key_pair.ec2_key.key_name
+  subnet_id     = aws_subnet.public_subnet.id
   vpc_security_group_ids = [aws_security_group.k8s_sg.id]
 
-  tags = {
-    Name = "control-plane-01"
-    Role = "control-plane"
-  }
+  tags = { Name = "control-plane-01" }
 }
 
-# Worker Node 1
 resource "aws_instance" "worker_01" {
   ami           = data.aws_ami.ubuntu_24_04.id
   instance_type = "t3.small"
-
-  key_name               = aws_key_pair.ec2_key.key_name
-  subnet_id              = aws_subnet.public_subnet.id
+  key_name      = aws_key_pair.ec2_key.key_name
+  subnet_id     = aws_subnet.public_subnet.id
   vpc_security_group_ids = [aws_security_group.k8s_sg.id]
 
-  tags = {
-    Name = "worker-01"
-    Role = "worker"
-  }
+  tags = { Name = "worker-01" }
 }
 
-# Worker Node 2
 resource "aws_instance" "worker_02" {
   ami           = data.aws_ami.ubuntu_24_04.id
   instance_type = "t3.small"
-
-  key_name               = aws_key_pair.ec2_key.key_name
-  subnet_id              = aws_subnet.public_subnet.id
+  key_name      = aws_key_pair.ec2_key.key_name
+  subnet_id     = aws_subnet.public_subnet.id
   vpc_security_group_ids = [aws_security_group.k8s_sg.id]
 
-  tags = {
-    Name = "worker-02"
-    Role = "worker"
+  tags = { Name = "worker-02" }
+}
+
+################################
+# Automation: Inventory & SSH Wait
+################################
+
+# 1. Generate the inventory file automatically
+resource "local_file" "ansible_inventory" {
+  content = <<EOT
+[control_plane]
+control-plane-01 ansible_host=${aws_instance.control_plane.public_ip} ansible_user=ubuntu ansible_ssh_private_key_file=${var.private_key_path}
+
+[workers]
+worker-01 ansible_host=${aws_instance.worker_01.public_ip} ansible_user=ubuntu ansible_ssh_private_key_file=${var.private_key_path}
+worker-02 ansible_host=${aws_instance.worker_02.public_ip} ansible_user=ubuntu ansible_ssh_private_key_file=${var.private_key_path}
+EOT
+  filename = "${path.module}/k8s-ansible/inventory.ini"
+}
+
+# 2. Wait for SSH to be ready before finishing
+resource "null_resource" "wait_for_ssh" {
+  depends_on = [aws_instance.control_plane, aws_instance.worker_01, aws_instance.worker_02]
+
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ubuntu"
+      private_key = file(var.private_key_path)
+      host        = aws_instance.control_plane.public_ip
+    }
+    inline = ["echo 'Instances are ready for Ansible!'"]
   }
-}
-
-################################
-# Outputs (for Ansible)
-################################
-output "control_plane_ip" {
-  value       = aws_instance.control_plane.public_ip
-  description = "Control plane public IP"
-}
-
-output "worker_ips" {
-  value = [
-    aws_instance.worker_01.public_ip,
-    aws_instance.worker_02.public_ip
-  ]
-  description = "Worker node public IPs"
 }
