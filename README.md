@@ -37,5 +37,10 @@ export KUBECONFIG=$PWD/kubeconfig
 # test cluster
 kubectl get nodes
 
+################
+## for one liner quick from the branch 
+terraform init
+terraform apply -auto-approve && cd k8s-ansible && ansible-playbook -i inventory.ini control-plane.yml workers.yml
+
 
 
